@@ -107,17 +107,18 @@ def to_one_hot(x):
     x, x_mask = x
     x = K.cast(x, 'int32')
     # 得到 [0,0,0,1,0],[0,1,0,0,0]这样的向量,即句子里每个单词的one-hot表示
+    # [batch_size, seq_len] --> [batch_size, seq_len, vocabulary_size+4], 单词数量+4(即len(char)+4)
     x = K.one_hot(x, len(chars) + 4) 
-    # 变成[batch_size, 1, one-hot_size], 即变成每个句子里有多少个某个单词
+    # [batch_size, 1, vocabulary_size+4], 即变成每个句子里有多少个某个单词
     x = K.sum(x_mask * x, 1, keepdims=True) 
     # 大于1都是1, 小于1都是0
     x = K.cast(K.greater(x, 0.5), 'float32')
-    return x   # x的size是[batch_size, 1, 单词数量+4, 即len(char)+4]
+    return x   # x的size是[batch_size, 1, vocabulary_size+4]
 
 
 class ScaleShift(Layer):
-    """缩放平移变换层（Scale and shift） Y=exp(b)*X+c
-        其实就是一个全连接层(Dense层), 区别只是b这里做了一个exp
+    """
+    缩放平移层（Scale and shift） Y=exp(b)*X+c
     """
 
     def __init__(self, **kwargs):
@@ -138,7 +139,8 @@ class ScaleShift(Layer):
 
 
 class OurLayer(Layer):
-    """定义新的Layer，增加reuse方法，允许在定义Layer时调用现成的层
+    """
+    定义新的Layer，增加reuse方法，允许在定义Layer时调用现成的层
     """
 
     def reuse(self, layer, *args, **kwargs):
@@ -163,7 +165,8 @@ class OurLayer(Layer):
 
 
 class OurBidirectional(OurLayer):
-    """自己封装双向RNN，允许传入mask，保证对齐
+    """
+    自己封装双向RNN，允许传入mask，保证对齐
     """
     '''
     为什么没有用Keras自带的Bidirectional()? 
@@ -184,14 +187,16 @@ class OurBidirectional(OurLayer):
 
     def call(self, inputs, **kwargs):
         x, mask = inputs 
-        x_forward = self.reuse(self.forward_layer, x)  #把数据送入正向层得到正向结果,结果是[y1,y2,y3...]
+        # [batch_size, seq_len, hidden_size/2]
+        x_forward = self.reuse(self.forward_layer, x)  #把原始数据[x_1,x_2,..x_k]送入正向层得到正向结果,结果是正序的y：[y_1,y_2,y_3...]
       
-        x_backward = self.reverse_sequence(x, mask)     #把原始数据反过来(但是pad部分不反,可以参照上面实现), x是[xk,xk-1,...x2,x1]
-        x_backward = self.reuse(self.backward_layer, x_backward) #反转数据送入后向层得到反向结果, y是[yk,yk-1,...y2,y1]
+        # [batch_size, seq_len, hidden_size/2]
+        x_backward = self.reverse_sequence(x, mask)     #把原始输入数据反过来(但是padding部分不参与反转,可以参照上面实现), 此时输入x是[x_k,x_k-1,...x_2,x_1]
+        x_backward = self.reuse(self.backward_layer, x_backward) #反转的数据送入后向层得到反向结果,结果是逆序的y'：[y'_k,y'_k-1,...y'_2,y'_1]
+        x_backward = self.reverse_sequence(x_backward, mask)  #再把y'反过来， 得到[y'_1,y'_2,...,y'_k-1]
         
-
-        x_backward = self.reverse_sequence(x_backward, mask)
         # 按最后一个维度拼起来. 
+        # [batch_size, seq_len, hidden_size]
         x = K.concatenate([x_forward, x_backward], 2) 
         return x * mask
 
@@ -200,17 +205,18 @@ class OurBidirectional(OurLayer):
 
 
 class Attention(OurLayer):
-    """multi-head+attention 多头注意力机制
-       主要加入并修改了mask机制
+    """
+    multi-head+attention 多头注意力机制
+    主要加入并修改了mask机制
     """
 
     def __init__(self, heads, size_per_head, key_size=None,
                  mask_right=False, **kwargs):
         super(Attention, self).__init__(**kwargs)
-        self.heads = heads
-        self.size_per_head = size_per_head
-        self.out_dim = heads * size_per_head
-        self.key_size = key_size if key_size else size_per_head
+        self.heads = heads                   # default = 8
+        self.size_per_head = size_per_head   # default = 16
+        self.out_dim = heads * size_per_head # default = 128
+        self.key_size = key_size if key_size else size_per_head # default = 16
         self.mask_right = mask_right
 
     def build(self, input_shape):
@@ -229,7 +235,7 @@ class Attention(OurLayer):
             if mode == 'mul':  
                 return x * mask #这里把x做点乘操作,把不应该有值的位置变成0
             else:              
-                return x - (1 - mask) * 1e10  #这里把0的位置改成-inf, 为了可以做softmax
+                return x - (1 - mask) * 1e10  #这里把0(即padding)的位置改成-inf, 为了后续softmax
 
     def call(self, inputs):
         q, k, v = inputs[:3]
@@ -239,32 +245,45 @@ class Attention(OurLayer):
             if len(inputs) > 4:
                 q_mask = inputs[4]
                 
-        # [batch_size, seq_len, out_dim]
+        """
+        If self-attention, then seq_len_q = seq_len_k = seq_len_v
+        Else, seq_len_k = seq_len_v
+        So I just use seq_len_kv here.
+        """
+        # [batch_size, seq_len_q, out_dim]
         qw = self.reuse(self.q_dense, q)
+        # [batch_size, seq_len_kv, out_dim]
         kw = self.reuse(self.k_dense, k)
         vw = self.reuse(self.v_dense, v)
         
-        # [batch_size, seq_len, n_head, head_size]
+        # [batch_size, seq_len_q, n_head, head_size]
         qw = K.reshape(qw, (-1, K.shape(qw)[1], self.heads, self.key_size))
+        # [batch_size, seq_len_kv, n_head, head_size]
         kw = K.reshape(kw, (-1, K.shape(kw)[1], self.heads, self.key_size))
         vw = K.reshape(vw, (-1, K.shape(vw)[1], self.heads, self.size_per_head))
 
-        # [batch_size, n_head, seq_len, head_size]
+        # [batch_size, n_head, seq_len_q, head_size]
         qw = K.permute_dimensions(qw, (0, 2, 1, 3))
+        # [batch_size, n_head, seq_len_kv, head_size]
         kw = K.permute_dimensions(kw, (0, 2, 1, 3))
         vw = K.permute_dimensions(vw, (0, 2, 1, 3))
 
-        # [batch_size, n_head, seq_len, seq_len]
+        # [batch_size, n_head, seq_len_q, seq_len_kv]
         a = K.batch_dot(qw, kw, [3, 3]) / self.key_size ** 0.5 
+        # [batch_size, seq_len_kv, seq_len_q, n_head]
         a = K.permute_dimensions(a, (0, 3, 2, 1))
+        # v_mask shape = [batch_size, seq_len_kv, 1]
         a = self.mask(a, v_mask, 'add')  
+        # [batch_size, n_head, seq_len_q, seq_len_kv]
         a = K.permute_dimensions(a, (0, 3, 2, 1))
-        a = K.softmax(a)
+        a = K.softmax(a)  # softmax on seq_len_kv
         
-        
-        o = K.batch_dot(a, vw, [3, 2])  # [batch_size, n_head,seq_len, head_size] 
-        o = K.permute_dimensions(o, (0, 2, 1, 3))   # [batch_size, seq_len, n_head, head_size]
-        o = K.reshape(o, (-1, K.shape(o)[1], self.out_dim))  # [batch_size, seq_len, out_dim]
+        # [batch_size, n_head, seq_len_q, head_size] 
+        o = K.batch_dot(a, vw, [3, 2])  
+        # [batch_size, seq_len_q, n_head, head_size]
+        o = K.permute_dimensions(o, (0, 2, 1, 3))   
+        # [batch_size, seq_len_q, out_dim]
+        o = K.reshape(o, (-1, K.shape(o)[1], self.out_dim))  
         o = self.mask(o, q_mask, 'mul')
         return o
 
@@ -275,8 +294,8 @@ class Attention(OurLayer):
 
 #  主要模型入口
 def graph():
-    x_in = Input(shape=(None,))
-    y_in = Input(shape=(None,))
+    x_in = Input(shape=(None,)) # [batch_size, seq_len_x]
+    y_in = Input(shape=(None,)) # [batch_size, seq_len_y]
     x, y = x_in, y_in
 
     
@@ -285,15 +304,18 @@ def graph():
     y_mask = Lambda(lambda x: K.cast(K.greater(K.expand_dims(x, 2), 0), 'float32'))(y)
 
     #为了引入先验知识, 把整篇文章做one hot处理
+    # [batch_size, 1, vocabulary_size+4]
     x_one_hot = Lambda(to_one_hot)([x, x_mask])
     x_prior = ScaleShift()(x_one_hot)  # 学习输出的先验分布（标题的字词很可能在文章出现过）
 
-
+    # vocabulary_size+4 --> embedding_size
     embedding = Embedding(len(chars) + 4, char_size)
+    # [batch_size, seq_len, embedding_size]
     x = embedding(x) #就是text
     y = embedding(y) #就是summarization
 
     # encoder，双层双向LSTM
+    # [batch_size, seq_len, hidden_size]
     x = OurBidirectional(CuDNNLSTM(z_dim // 2, return_sequences=True))([x, x_mask])
     #如果是CPU请换成这行
     #x = OurBidirectional(LSTM(z_dim // 2, return_sequences=True))([x, x_mask])
@@ -305,6 +327,7 @@ def graph():
 
 
     # decoder，双层单向LSTM
+    # [batch_size, seq_len, hidden_size]
     y = CuDNNLSTM(z_dim, return_sequences=True)(y)
     #如果是CPU请换成这行
     #y = LSTM(z_dim, return_sequences=True)(y)
@@ -314,18 +337,22 @@ def graph():
     #y = LSTM(z_dim, return_sequences=True)(y)
     y = LayerNormalization()(y)
 
-
+    # [batch_size, seq_len_y, attention_out_dim]
     xy = Attention(8, 16)([y, x, x, x_mask])
+    # [batch_size, seq_len_y, hidden_size+attention_out_dim]
     xy = Concatenate()([y, xy])
 
     # 输出分类
-    xy = Dense(char_size)(xy) # 输出维度char_size
+    # [batch_size, seq_len_y, embedding_size]
+    xy = Dense(char_size)(xy)
     xy = Activation('relu')(xy)
-    xy = Dense(len(chars) + 4)(xy)  # 输出维度len(chars) + 4
+    # [batch_size, seq_len_y, vocabulary_size + 4]
+    xy = Dense(len(chars) + 4)(xy) 
+    # [batch_size, seq_len_y, vocabulary_size + 4]
     xy = Lambda(lambda x: (x[0] + x[1]) / 2)([xy, x_prior])  # 与先验结果平均
-    xy = Activation('softmax')(xy)
+    xy = Activation('softmax')(xy)  # do softmax on vocabulary_size
 
-    # 交叉熵作为loss，但mask掉padding部分
+    # 多分类交叉熵作为loss，但mask掉padding部分
     cross_entropy = K.sparse_categorical_crossentropy(y_in[:, 1:], xy[:, :-1])
     cross_entropy = K.sum(cross_entropy * y_mask[:, 1:, 0]) / K.sum(y_mask[:, 1:, 0])
 
@@ -337,7 +364,8 @@ def graph():
 
 
 def gen_sent(s, model, topk=3, maxlen=64):
-    """beam search解码, 有一个参数k,即选择k个最优结果.
+    """
+    beam search解码, 有一个参数k,即选择k个最优结果.
     每次只保留topk个最优候选结果；如果topk=1，那么就是贪心搜索
     """
     # 输入转id
