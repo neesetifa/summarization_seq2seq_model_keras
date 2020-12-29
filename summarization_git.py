@@ -27,7 +27,6 @@ import os
 import rouge as rouge
 
 
-
 min_count = 5  #字出现最低频率,低于这个就去除
 maxlen = 512   #序列最大长度
 batch_size = 128  
@@ -268,6 +267,12 @@ class Attention(OurLayer):
         kw = K.permute_dimensions(kw, (0, 2, 1, 3))
         vw = K.permute_dimensions(vw, (0, 2, 1, 3))
 
+        """
+        Try to use tf.matmul if K.batch_dot doesn't work
+        e.g.
+        a = tf.matmul(qw, K.permute_dimensions(kw, (0,1,3,2)))
+        Keypoint is: get correct shape
+        """
         # [batch_size, n_head, seq_len_q, seq_len_kv]
         a = K.batch_dot(qw, kw, [3, 3]) / self.key_size ** 0.5 
         # [batch_size, seq_len_kv, seq_len_q, n_head]
@@ -278,6 +283,7 @@ class Attention(OurLayer):
         a = K.permute_dimensions(a, (0, 3, 2, 1))
         a = K.softmax(a)  # softmax on seq_len_kv
         
+
         # [batch_size, n_head, seq_len_q, head_size] 
         o = K.batch_dot(a, vw, [3, 2])  
         # [batch_size, seq_len_q, n_head, head_size]
