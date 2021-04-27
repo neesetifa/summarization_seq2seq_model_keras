@@ -1,3 +1,3 @@
-# Summarization_Keras
+# Summarization Seq2seq Model - Keras
 
-This is a Keras(2.2.4) version implementation. You may find a pytorch implementation in my repositories.
+This is a Chinese news summarization model written in Keras(2.2.4). You may find a pytorch implementation in my another repository.
