@@ -139,7 +139,8 @@ class ScaleShift(Layer):
 
 class OurLayer(Layer):
     """
-    定义新的Layer，增加reuse方法，允许在定义Layer时调用现成的层
+    定义新的Layer，增加reuse方法，允许在定义Layer时调用现成的层。
+    Keras 2.3之前Layer里直接套其他Layer是训练不了的， 所以需要这种方式来复用别的已经实现好的layer。2.3之后不需要了，可以直接layer套layer。
     """
 
     def reuse(self, layer, *args, **kwargs):
